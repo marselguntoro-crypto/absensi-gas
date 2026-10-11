@@ -31,6 +31,19 @@ Aplikasi menyediakan **Halaman Login interaktif** yang mendukung autentikasi man
   - *Execute as*: **Me**
   - *Who has access*: **Anyone** (bisa diakses oleh siapa saja termasuk akun Gmail umum) ATAU **Anyone within domain** (jika khusus Google Workspace).
 
+## Deployment ke Vercel (Frontend Hosting)
+Frontend web app dapat di-host langsung di **Vercel** dengan kecepatan tinggi dan nama domain bersih (misal: `absensi.vercel.app`):
+1. **Pastikan Web App Google Apps Script telah dideploy**:
+   - *Execute as*: **Me**
+   - *Who has access*: **Anyone**
+2. **Hubungkan GitHub ke Vercel**:
+   - Buka [vercel.com](https://vercel.com) dan login dengan akun GitHub Anda.
+   - Klik **Add New...** → **Project**.
+   - Pilih repositori `absensi-gas` lalu klik **Import**.
+   - Pada bagian **Build and Output Settings**, biarkan default (Framework Preset: **Other**).
+   - Klik **Deploy**.
+3. Selesai! Web app Anda langsung aktif dengan domain Vercel yang dapat dibagikan dan dibuka di ponsel manapun secara instan.
+
 ## Catatan penting
 - **Sistem Fallback**: Bila pengguna membuka aplikasi di Google Workspace terautentikasi dan belum memiliki sesi login manual, sistem tetap dapat mengenali akun Google secara otomatis.
 - **Butir "perlu disahkan"** (PRD bag. 19) dibuat dapat diatur di menu Pengaturan: toleransi/pembulatan terlambat (default: dibulatkan ke atas, toleransi 0 → masuk 08.15.01 dihitung terlambat 1 menit), toleransi pulang cepat, dan apakah izin/sakit disetujui membebaskan potongan (default: ya).

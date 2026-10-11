@@ -1,0 +1,822 @@
+(function () {
+  'use strict';
+  var S = { me: null, token: localStorage.getItem('absensi_token') || '', f: {}, pos: null, pgfn: null, reload: null };
+  var P = {}, H = {};
+  var DAYS = ['', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
+
+  /* ---------- util ---------- */
+  function $(s, r) { return (r || document).querySelector(s); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function rp(n) { return 'Rp' + String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function addDays(s, n) {
+    var p = s.split('-'), d = new Date(+p[0], +p[1] - 1, +p[2] + n, 12);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+
+  var DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbxZUAB0KDTFONqNgpTEcwPRl9nxB846XlZ3d9o662HDhPzH5ecWoaoW5WXUynX2NjICrA/exec';
+  var API_URL = localStorage.getItem('absensi_api_url') || DEFAULT_API_URL;
+
+  function handleResponse(r, res, rej) {
+    if (r && r.ok) {
+      res(r.data);
+    } else {
+      if (r && (r.code === 'AUTH_REQUIRED' || r.code === 'USER_INACTIVE')) {
+        if (S.me) {
+          localStorage.removeItem('absensi_token');
+          S.token = '';
+          S.me = null;
+          showLogin(r.message || 'Sesi berakhir. Silakan masuk kembali.');
+        }
+      }
+      rej(r || { message: 'Respons tidak valid dari server.' });
+    }
+  }
+
+  function call(fn) {
+    var args = [].slice.call(arguments, 1);
+
+    // Fallback bila dijalankan langsung di Apps Script iframe
+    if (typeof google !== 'undefined' && google.script && google.script.run && typeof google.script.run.api_call === 'function') {
+      return new Promise(function (res, rej) {
+        google.script.run
+          .withSuccessHandler(function (r) { handleResponse(r, res, rej); })
+          .withFailureHandler(function (e) { rej({ message: (e && e.message) || 'Gagal menghubungi server.' }); })
+          .api_call(S.token || '', fn, args);
+      });
+    }
+
+    // Default: fetch HTTP POST (untuk Vercel / domain web hosting)
+    return fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ fn: fn, token: S.token || '', args: args })
+    })
+    .then(function (response) {
+      if (!response.ok) throw new Error('Server mengembalikan kode status ' + response.status);
+      return response.json();
+    })
+    .then(function (r) {
+      return new Promise(function (res, rej) { handleResponse(r, res, rej); });
+    })
+    .catch(function (err) {
+      var msg = (err && err.message) || 'Gagal menghubungi server.';
+      if (msg.indexOf('Failed to fetch') >= 0 || msg.indexOf('NetworkError') >= 0 || msg.indexOf('Load failed') >= 0) {
+        msg = 'Koneksi ke server backend gagal. Pastikan deployment Web App disetel ke "Anyone" dan koneksi stabil.';
+      }
+      throw { message: msg };
+    });
+  }
+  function toast(msg, type) {
+    var d = document.createElement('div');
+    d.className = type || '';
+    d.textContent = msg;
+    $('#toast').appendChild(d);
+    setTimeout(function () { d.remove(); }, type === 'err' ? 6000 : 3500);
+  }
+  function pill(st) {
+    st = String(st || '');
+    var c = '';
+    if (/^(HADIR|VALID|Disetujui|AKTIF)$/.test(st)) c = 'ok';
+    else if (/MANGKIR|Ditolak|VOID|DITOLAK|NONAKTIF/.test(st)) c = 'err';
+    else if (/TERLAMBAT|PULANG CEPAT|TIDAK ABSEN|Menunggu|KOREKSI/.test(st)) c = 'warn';
+    return '<span class="pill ' + c + '">' + esc(st || '—') + '</span>';
+  }
+  function tbl(cols, rows) {
+    if (!rows || !rows.length) return '<p class="muted">Tidak ada data.</p>';
+    return '<div class="tw"><table><thead><tr>' + cols.map(function (c) { return '<th>' + esc(c.h) + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + rows.map(function (r) {
+        return '<tr>' + cols.map(function (c) { return '<td>' + (c.f ? c.f(r) : esc(r[c.k])) + '</td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+  function pager(p) {
+    return '<div class="pager"><button class="btn ghost sm" data-act="pg" data-d="-1"' + (p.page <= 1 ? ' disabled' : '') + '>‹ Sebelumnya</button>' +
+      '<span class="muted">Hal. ' + p.page + ' / ' + p.pages + ' · ' + p.total + ' data</span>' +
+      '<button class="btn ghost sm" data-act="pg" data-d="1"' + (p.page >= p.pages ? ' disabled' : '') + '>Berikutnya ›</button></div>';
+  }
+  function ff(label, name, val, type, extra) {
+    return '<label>' + esc(label) + '<input name="' + name + '" type="' + (type || 'text') + '" value="' + esc(val == null ? '' : val) + '" ' + (extra || '') + '></label>';
+  }
+  function fs(label, name, opts, val) {
+    return '<label>' + esc(label) + '<select name="' + name + '">' + opts.map(function (o) {
+      return '<option value="' + esc(o[0]) + '"' + (String(o[0]) === String(val) ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+    }).join('') + '</select></label>';
+  }
+  function fchk(label, name, on) { return '<label class="chk"><input type="checkbox" name="' + name + '"' + (on ? ' checked' : '') + '> ' + esc(label) + '</label>'; }
+  function ftxt(label, name, val, ph) { return '<label>' + esc(label) + '<textarea name="' + name + '" rows="2" placeholder="' + esc(ph || '') + '">' + esc(val || '') + '</textarea></label>'; }
+  function vals(root) {
+    var o = {};
+    [].forEach.call(root.querySelectorAll('[name]'), function (el) {
+      if (el.type === 'file') return;
+      o[el.name] = el.type === 'checkbox' ? (el.checked ? 'Y' : 'N') : el.value;
+    });
+    return o;
+  }
+  function dl(name, mime, b64) {
+    var bin = atob(b64), u = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([u], { type: mime }));
+    a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  }
+  function readB64(file) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onload = function () { res(String(r.result).split(',')[1] || ''); };
+      r.onerror = function () { rej({ message: 'Berkas tidak dapat dibaca.' }); };
+      r.readAsDataURL(file);
+    });
+  }
+
+  /* ---------- modal ---------- */
+  function closeModal() { var m = $('.modal'); if (m) m.remove(); }
+  function modal(title, body, onOk, okText) {
+    closeModal();
+    var d = document.createElement('div');
+    d.className = 'modal';
+    d.innerHTML = '<div class="mbox"><h3>' + esc(title) + '</h3><form>' + body +
+      '<div class="row end"><button type="button" class="btn ghost" data-act="mclose">' + (onOk ? 'Batal' : 'Tutup') + '</button>' +
+      (onOk ? '<button class="btn">' + esc(okText || 'Simpan') + '</button>' : '') + '</div></form></div>';
+    document.body.appendChild(d);
+    var f = $('form', d);
+    f.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (!onOk) return;
+      var b = $('button.btn:not(.ghost)', f);
+      b.disabled = true;
+      Promise.resolve().then(function () { return onOk(vals(f), f); })
+        .then(function () { closeModal(); })
+        .catch(function (err) { toast((err && err.message) || 'Gagal.', 'err'); b.disabled = false; });
+    });
+    return f;
+  }
+
+  /* ---------- delegasi klik ---------- */
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-act]');
+    if (!b) return;
+    var h = H[b.dataset.act];
+    if (h) { e.preventDefault(); h(b.dataset, b); }
+  });
+  H.mclose = closeModal;
+  H.nav = function (d) { go(d.p); };
+  H.pg = function (d) { if (S.pgfn) S.pgfn(Number(d.d)); };
+  H.toggle_pwd = function (d, b) {
+    var inp = $('#login-pwd');
+    if (!inp) return;
+    if (inp.type === 'password') {
+      inp.type = 'text';
+      b.textContent = '🙈';
+    } else {
+      inp.type = 'password';
+      b.textContent = '👁️';
+    }
+  };
+  H.logout = function () {
+    if (!confirm('Apakah Anda yakin ingin keluar dari sistem?')) return;
+    localStorage.removeItem('absensi_token');
+    S.token = '';
+    S.me = null;
+    toast('Anda telah keluar.', 'ok');
+    showLogin();
+  };
+  H.changepwd = function () {
+    var body =
+      ff('Kata Sandi Lama', 'old_password', '', 'password', 'required') +
+      ff('Kata Sandi Baru (min. 6 karakter)', 'new_password', '', 'password', 'required') +
+      ff('Konfirmasi Kata Sandi Baru', 'confirm_password', '', 'password', 'required');
+    modal('Ganti Kata Sandi', body, function (o) {
+      if (!o.new_password || o.new_password.length < 6) {
+        throw { message: 'Kata sandi baru minimal 6 karakter.' };
+      }
+      if (o.new_password !== o.confirm_password) {
+        throw { message: 'Konfirmasi kata sandi tidak cocok.' };
+      }
+      return call('api_changePassword', o.old_password, o.new_password).then(function () {
+        toast('Kata sandi berhasil diperbarui.', 'ok');
+      });
+    }, 'Simpan Sandi');
+  };
+
+  /* ---------- shell ---------- */
+  function shell() {
+    var admin = S.me.user.role === 'ADMIN';
+    var items = [['home', 'Beranda'], ['history', 'Riwayat'], ['leave', 'Izin/Sakit']];
+    if (admin) items = items.concat([['dash', 'Dashboard'], ['atts', 'Transaksi'], ['leaveadm', 'Persetujuan'], ['emps', 'Pegawai'],
+      ['locs', 'Lokasi'], ['sched', 'Jadwal & Kalender'], ['report', 'Laporan'], ['audit', 'Audit'], ['settings', 'Pengaturan']]);
+    $('#app').innerHTML = '<header class="top"><div><b>Sistem Absensi Pegawai</b><small>' + esc(S.me.user.name) + ' (' + esc(S.me.user.role) +
+      ')</small></div><div class="header-actions">' +
+      '<button class="btn ghost sm" data-act="changepwd" title="Ganti Kata Sandi">🔑 Kata Sandi</button>' +
+      '<button class="btn err sm" data-act="logout" title="Keluar dari akun">Keluar</button>' +
+      '</div></header><nav>' +
+      items.map(function (i) { return '<button data-act="nav" data-p="' + i[0] + '">' + esc(i[1]) + '</button>'; }).join('') +
+      '</nav><main id="view"></main>';
+  }
+  function go(p) {
+    S.pgfn = null; S.reload = null;
+    [].forEach.call(document.querySelectorAll('nav button'), function (b) { b.classList.toggle('on', b.dataset.p === p); });
+    var v = $('#view');
+    v.innerHTML = '<p class="muted">Memuat…</p>';
+    Promise.resolve().then(function () { return P[p](v); }).catch(function (err) {
+      v.innerHTML = '<div class="card"><b>Gagal memuat halaman.</b><p>' + esc(err && err.message) + '</p></div>';
+    });
+  }
+  function mkList(v, key, def, filt, api, render, top) {
+    var f = S.f[key] = S.f[key] || JSON.parse(JSON.stringify(def));
+    v.innerHTML = (top || '') + '<div class="card"><div class="row" id="flt">' + filt(f) + '<button class="btn" data-act="fsearch">Cari</button></div></div>' +
+      '<div class="card" id="lst"><p class="muted">Memuat…</p></div>';
+    function load() {
+      return call(api, f).then(function (p) {
+        $('#lst').innerHTML = render(p) + (p.pages !== undefined ? pager(p) : '');
+      }).catch(function (e) { $('#lst').innerHTML = '<p class="muted">' + esc(e.message) + '</p>'; });
+    }
+    H.fsearch = function () { Object.assign(f, vals($('#flt'))); f.page = 1; load(); };
+    S.pgfn = function (d) { f.page = (f.page || 1) + d; load(); };
+    S.reload = load;
+    return load();
+  }
+
+  /* ========================= PEGAWAI ========================= */
+  function getPos() {
+    return new Promise(function (res, rej) {
+      if (!navigator.geolocation) return rej({ message: 'Browser tidak mendukung GPS.' });
+      navigator.geolocation.getCurrentPosition(function (p) {
+        res({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy, posTs: p.timestamp });
+      }, function (e) {
+        var m = { 1: 'Aktifkan izin lokasi pada browser, lalu coba lagi.', 2: 'Lokasi belum terbaca. Aktifkan GPS dan coba kembali.', 3: 'Pembacaan lokasi terlalu lama. Coba lagi di tempat terbuka.' };
+        rej({ message: m[e.code] || 'Lokasi tidak tersedia.' });
+      }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+    });
+  }
+  function syncBtns() {
+    var t = S.today || {}, bi = $('#bIn'), bo = $('#bOut');
+    if (bi) bi.disabled = !S.pos || t.done_in;
+    if (bo) bo.disabled = !S.pos || t.done_out;
+  }
+  P.home = function (v) {
+    return call('api_myToday').then(function (t) {
+      var c = t.calc;
+      S.today = t; S.pos = null;
+      var lim = t.locations.length ? Math.min.apply(null, t.locations.map(function (l) { return Number(l.max_accuracy_m) || 999; })) : null;
+      S.accLimit = lim;
+      v.innerHTML = '<div class="card"><div class="muted">' + esc(t.date) + (t.workday ? ' · Jadwal ' + esc(t.start) + '–' + esc(t.end) + ' WIB' : ' · ' + esc(t.reason || 'Bukan hari kerja')) +
+        '</div><div class="grid" style="margin-top:10px"><div class="stat"><span>Masuk</span><b>' + esc(c.in_time || '—') + '</b></div>' +
+        '<div class="stat"><span>Pulang</span><b>' + esc(c.out_time || '—') + '</b></div>' +
+        '<div class="stat"><span>Status</span><b style="font-size:15px">' + esc(c.status || '—') + '</b></div>' +
+        '<div class="stat"><span>Potongan hari ini</span><b>' + rp(c.total_amount) + '</b></div></div></div>' +
+        '<div class="card"><h3>Absensi</h3>' + (t.workday ?
+          '<div id="locbox" class="loc">Lokasi belum diambil. Tekan “Ambil lokasi” terlebih dahulu.' + (lim ? ' Batas akurasi ±' + lim + ' m.' : '') + '</div>' +
+          '<div class="row"><button class="btn ghost" data-act="getloc">Ambil lokasi</button>' +
+          '<button class="btn ok" data-act="clock" data-t="MASUK" id="bIn" disabled>Absen Masuk</button>' +
+          '<button class="btn" data-act="clock" data-t="PULANG" id="bOut" disabled>Absen Pulang</button></div>' :
+          '<p class="muted">Hari ini tidak terjadwal sebagai hari kerja.</p>') +
+        '<p class="muted" style="font-size:12px;margin-top:12px">Lokasi hanya diambil saat Anda menekan tombol dan dipakai untuk memverifikasi kehadiran; tidak ada pelacakan terus-menerus. Server memeriksa ulang identitas, jadwal, akurasi, dan jarak Anda.</p></div>';
+      syncBtns();
+    });
+  };
+  H.getloc = function (d, b) {
+    var box = $('#locbox');
+    box.className = 'loc'; box.textContent = 'Mengambil lokasi…'; b.disabled = true;
+    getPos().then(function (p) {
+      S.pos = p;
+      var warn = S.accLimit && p.accuracy > S.accLimit;
+      box.className = 'loc ' + (warn ? 'bad' : 'ok');
+      box.textContent = 'Lokasi terbaca, akurasi ±' + Math.round(p.accuracy) + ' m.' + (warn ? ' Melebihi batas ±' + S.accLimit + ' m — ambil ulang di tempat terbuka.' : '');
+    }).catch(function (err) {
+      S.pos = null; box.className = 'loc bad'; box.textContent = err.message;
+    }).then(function () { b.disabled = false; syncBtns(); });
+  };
+  H.clock = function (d, b) {
+    if (!S.pos) return;
+    var p = S.pos; b.disabled = true;
+    call('api_checkin', { type: d.t, lat: p.lat, lng: p.lng, accuracy: p.accuracy, posTs: p.posTs }).then(function (r) {
+      toast('Absen ' + r.type.toLowerCase() + ' berhasil pukul ' + r.time + ' WIB (jarak ' + r.distance_m + ' m).', 'ok');
+      go('home');
+    }).catch(function (err) {
+      S.pos = null; toast(err.message, 'err');
+      var box = $('#locbox'); if (box) { box.className = 'loc bad'; box.textContent = err.message + ' Ambil lokasi ulang.'; }
+      syncBtns();
+    });
+  };
+
+  P.history = function (v) {
+    var m = S.f.hmonth || S.me.today.substr(0, 7);
+    v.innerHTML = '<div class="card"><div class="row"><label>Bulan<input type="month" id="hm" value="' + esc(m) + '"></label><button class="btn" data-act="hload">Tampilkan</button></div></div><div id="hres"></div>';
+    return loadHist();
+  };
+  H.hload = function () { S.f.hmonth = $('#hm').value; loadHist().catch(function (e) { toast(e.message, 'err'); }); };
+  function loadHist() {
+    return call('api_myHistory', $('#hm').value).then(function (r) {
+      var s = r.summary || {};
+      $('#hres').innerHTML = '<div class="grid"><div class="stat"><span>Hari kerja</span><b>' + (s.work_days || 0) + '</b></div><div class="stat"><span>Hadir</span><b>' + (s.hadir || 0) +
+        '</b></div><div class="stat"><span>Terlambat</span><b>' + (s.terlambat || 0) + '×</b></div><div class="stat"><span>Total potongan</span><b>' + rp(s.total) + '</b></div></div>' +
+        '<div class="card" style="margin-top:12px">' + tbl([
+          { h: 'Tanggal', k: 'date' }, { h: 'Masuk', k: 'in_time' }, { h: 'Pulang', k: 'out_time' }, { h: 'Status', f: function (x) { return pill(x.status); } },
+          { h: 'Terlambat', f: function (x) { return rp(x.late_amount); } }, { h: 'Pulang cepat', f: function (x) { return rp(x.early_leave_amount); } },
+          { h: 'Tdk masuk', f: function (x) { return rp(x.missing_in_amount); } }, { h: 'Tdk pulang', f: function (x) { return rp(x.missing_out_amount); } },
+          { h: 'Total', f: function (x) { return '<b>' + rp(x.total_amount) + '</b>'; } }
+        ], r.rows) + '</div>';
+    });
+  }
+
+  P.leave = function (v) {
+    return call('api_leaveMine').then(function (rows) {
+      v.innerHTML = '<div class="card"><h3>Ajukan izin / sakit</h3><form id="lform"><div class="row">' +
+        fs('Jenis', 'leave_type', [['IZIN', 'Izin'], ['SAKIT', 'Sakit']], 'IZIN') + ff('Mulai', 'start_date', S.me.today, 'date') + ff('Selesai', 'end_date', S.me.today, 'date') + '</div>' +
+        ftxt('Alasan', 'reason', '', 'Jelaskan alasan pengajuan') +
+        '<label>Lampiran (PDF/JPG/PNG, maks ' + S.me.max_attachment_kb + ' KB; opsional)<input type="file" id="lf" accept=".pdf,.jpg,.jpeg,.png"></label>' +
+        '<div class="row end"><button class="btn">Kirim pengajuan</button></div></form></div>' +
+        '<div class="card"><h3>Pengajuan saya</h3>' + tbl([
+          { h: 'Jenis', k: 'leave_type' }, { h: 'Mulai', k: 'start_date' }, { h: 'Selesai', k: 'end_date' }, { h: 'Alasan', f: function (x) { return esc(String(x.reason).substr(0, 60)); } },
+          { h: 'Status', f: function (x) { return pill(x.status); } }, { h: 'Catatan', k: 'review_note' },
+          { h: '', f: function (x) {
+            var out = '';
+            if (x.has_attachment) out += '<button class="btn ghost sm" data-act="lattach" data-id="' + esc(x.request_id) + '">Lampiran</button> ';
+            if (x.status === 'Menunggu' || (x.status === 'Disetujui' && x.start_date > S.me.today)) out += '<button class="btn err sm" data-act="lcancel" data-id="' + esc(x.request_id) + '">Batalkan</button>';
+            return out;
+          } }
+        ], rows) + '</div>';
+      $('#lform').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var o = vals(this), file = $('#lf').files[0], btn = $('button', this);
+        btn.disabled = true;
+        Promise.resolve().then(function () {
+          if (!file) return null;
+          if (file.size > S.me.max_attachment_kb * 1024) throw { message: 'Ukuran lampiran melebihi ' + S.me.max_attachment_kb + ' KB.' };
+          return readB64(file).then(function (b) { return { name: file.name, base64: b }; });
+        }).then(function (att) { if (att) o.attachment = att; return call('api_leaveSubmit', o); })
+          .then(function () { toast('Pengajuan terkirim.', 'ok'); go('leave'); })
+          .catch(function (err) { toast(err.message, 'err'); btn.disabled = false; });
+      });
+    });
+  };
+  H.lcancel = function (d) {
+    if (!confirm('Batalkan pengajuan ini?')) return;
+    call('api_leaveCancel', d.id).then(function () { toast('Pengajuan dibatalkan.', 'ok'); go('leave'); }).catch(function (e) { toast(e.message, 'err'); });
+  };
+  H.lattach = function (d) {
+    call('api_leaveAttachment', d.id).then(function (r) { dl(r.name, r.mime, r.base64); }).catch(function (e) { toast(e.message, 'err'); });
+  };
+
+  /* ========================= ADMIN ========================= */
+  P.dash = function (v) {
+    var f = S.f.dash = S.f.dash || { date: S.me.today, unit: '' };
+    return call('api_dashboard', f.date, f.unit).then(function (r) {
+      var c = r.counts, max = Math.max.apply(null, r.trend.map(function (x) { return x.hadir; }).concat([1]));
+      v.innerHTML = '<div class="card"><div class="row" id="flt">' + ff('Tanggal', 'date', r.date, 'date') +
+        '<label>Unit<select name="unit"><option value="">Semua unit</option>' + r.units.map(function (u) { return '<option' + (u === f.unit ? ' selected' : '') + '>' + esc(u) + '</option>'; }).join('') +
+        '</select></label><button class="btn" data-act="dashgo">Tampilkan</button></div></div>' +
+        '<div class="grid">' + [['Pegawai aktif', c.total], ['Hadir', c.hadir], ['Belum masuk', c.belum_masuk], ['Belum pulang', c.belum_pulang], ['Terlambat', c.terlambat],
+          ['Pulang cepat', c.pulang_cepat], ['Izin', c.izin], ['Sakit', c.sakit], ['Izin menunggu', r.pending_leave]].map(function (x) {
+          return '<div class="stat"><span>' + x[0] + '</span><b>' + x[1] + '</b></div>';
+        }).join('') + '</div>' + (c.workday === 0 ? '<p class="muted">Tanggal ini bukan hari kerja.</p>' : '') +
+        '<div class="card" style="margin-top:12px"><h3>Tren kehadiran 14 hari</h3><div class="bars" style="margin-bottom:24px">' +
+        r.trend.map(function (x) { return '<div style="height:' + Math.round(x.hadir / max * 100) + '%" title="' + esc(x.date) + ': ' + x.hadir + '"><small>' + esc(x.date.substr(8)) + '</small></div>'; }).join('') +
+        '</div></div><div class="card"><h3>Transaksi terbaru</h3>' + tbl([
+          { h: 'Waktu', k: 'timestamp_server' }, { h: 'Nama', k: 'full_name' }, { h: 'Unit', k: 'unit' }, { h: 'Jenis', k: 'type' }, { h: 'Jarak (m)', k: 'distance_m' },
+          { h: 'Status', f: function (x) { return pill(x.validation_status); } }
+        ], r.recent) + '</div>';
+    });
+  };
+  H.dashgo = function () { Object.assign(S.f.dash, vals($('#flt'))); go('dash'); };
+
+  P.atts = function (v) {
+    var t = S.me.today;
+    return mkList(v, 'atts', { from: addDays(t, -7), to: t, q: '', unit: '', status: '', page: 1 }, function (f) {
+      return ff('Dari', 'from', f.from, 'date') + ff('Sampai', 'to', f.to, 'date') + ff('Nama/email/NIP', 'q', f.q) + ff('Unit', 'unit', f.unit) +
+        fs('Status', 'status', [['', 'Semua'], ['VALID', 'VALID'], ['KOREKSI', 'KOREKSI'], ['VOID', 'VOID']], f.status);
+    }, 'api_attList', function (p) {
+      return tbl([
+        { h: 'Waktu (server)', k: 'timestamp_server' }, { h: 'Nama', k: 'full_name' }, { h: 'Unit', k: 'unit' }, { h: 'Jenis', k: 'type' },
+        { h: 'Lokasi', k: 'location' }, { h: 'Jarak', f: function (x) { return x.distance_m === '' ? '—' : esc(x.distance_m) + ' m'; } },
+        { h: 'Akurasi', f: function (x) { return x.accuracy_m === '' ? '—' : '±' + esc(x.accuracy_m) + ' m'; } },
+        { h: 'Koordinat', f: function (x) {
+          return x.latitude === '' ? '—' : '<a href="https://www.google.com/maps?q=' + encodeURIComponent(x.latitude + ',' + x.longitude) + '" target="_blank" rel="noopener">peta</a>';
+        } },
+        { h: 'Status', f: function (x) { return pill(x.validation_status) + (x.source === 'ADMIN_CORRECTION' ? ' <span class="muted">(koreksi)</span>' : ''); } },
+        { h: '', f: function (x) { return x.validation_status === 'VOID' ? '' : '<button class="btn err sm" data-act="attvoid" data-id="' + esc(x.attendance_id) + '">Batalkan</button>'; } }
+      ], p.rows);
+    }, '<div class="card"><button class="btn" data-act="attmanual">+ Koreksi manual</button> <span class="muted">Koreksi tidak menimpa data lama; semuanya tercatat di audit log.</span></div>');
+  };
+  H.attvoid = function (d) {
+    modal('Batalkan transaksi', ftxt('Alasan pembatalan (wajib)', 'reason', ''), function (o) {
+      return call('api_attVoid', d.id, o.reason).then(function () { toast('Transaksi dibatalkan.', 'ok'); S.reload && S.reload(); });
+    }, 'Batalkan transaksi');
+  };
+  H.attmanual = function () {
+    call('api_empList', { status: 'AKTIF', size: 100 }).then(function (p) {
+      modal('Koreksi absensi manual',
+        '<label>ID pegawai<input name="employee_id" list="dl-emp" placeholder="EMP-0001" required></label><datalist id="dl-emp">' +
+        p.rows.map(function (e) { return '<option value="' + esc(e.employee_id) + '">' + esc(e.full_name) + '</option>'; }).join('') + '</datalist>' +
+        '<div class="row">' + ff('Tanggal', 'work_date', S.me.today, 'date') + fs('Jenis', 'type', [['MASUK', 'Masuk'], ['PULANG', 'Pulang']], 'MASUK') + ff('Jam (WIB)', 'time', '08:00', 'time') + '</div>' +
+        ftxt('Alasan koreksi (wajib)', 'reason', ''), function (o) {
+          return call('api_attManual', o).then(function () { toast('Koreksi tersimpan.', 'ok'); S.reload && S.reload(); });
+        });
+    }).catch(function (e) { toast(e.message, 'err'); });
+  };
+
+  P.leaveadm = function (v) {
+    return mkList(v, 'ladm', { status: 'Menunggu', q: '', page: 1 }, function (f) {
+      return fs('Status', 'status', [['', 'Semua'], ['Menunggu', 'Menunggu'], ['Disetujui', 'Disetujui'], ['Ditolak', 'Ditolak'], ['Dibatalkan', 'Dibatalkan']], f.status) + ff('Nama/NIP', 'q', f.q);
+    }, 'api_leaveAdminList', function (p) {
+      return tbl([
+        { h: 'Pegawai', k: 'full_name' }, { h: 'Unit', k: 'unit' }, { h: 'Jenis', k: 'leave_type' }, { h: 'Mulai', k: 'start_date' }, { h: 'Selesai', k: 'end_date' },
+        { h: 'Alasan', f: function (x) { return '<span title="' + esc(x.reason) + '">' + esc(String(x.reason).substr(0, 50)) + '</span>'; } },
+        { h: 'Status', f: function (x) { return pill(x.status); } }, { h: 'Catatan', k: 'review_note' },
+        { h: '', f: function (x) {
+          var o = x.has_attachment ? '<button class="btn ghost sm" data-act="lattach" data-id="' + esc(x.request_id) + '">Lampiran</button> ' : '';
+          if (x.status === 'Menunggu') o += '<button class="btn ok sm" data-act="ldec" data-d="Disetujui" data-id="' + esc(x.request_id) + '">Setujui</button> <button class="btn err sm" data-act="ldec" data-d="Ditolak" data-id="' + esc(x.request_id) + '">Tolak</button>';
+          return o;
+        } }
+      ], p.rows);
+    });
+  };
+  H.ldec = function (d) {
+    modal(d.d === 'Disetujui' ? 'Setujui pengajuan' : 'Tolak pengajuan', ftxt(d.d === 'Ditolak' ? 'Alasan penolakan (wajib)' : 'Catatan (opsional)', 'note', ''), function (o) {
+      return call('api_leaveDecide', d.id, d.d, o.note).then(function () { toast('Keputusan tersimpan.', 'ok'); S.reload && S.reload(); });
+    }, d.d === 'Disetujui' ? 'Setujui' : 'Tolak');
+  };
+
+  /* ---- Pegawai ---- */
+  P.emps = function (v) {
+    return mkList(v, 'emps', { q: '', status: '', unit: '', page: 1 }, function (f) {
+      return ff('Cari', 'q', f.q) + fs('Status', 'status', [['', 'Semua'], ['AKTIF', 'Aktif'], ['NONAKTIF', 'Nonaktif']], f.status) + ff('Unit', 'unit', f.unit);
+    }, 'api_empList', function (p) {
+      S.lastEmps = p.rows;
+      return tbl([
+        { h: 'NIP', k: 'employee_number' }, { h: 'Nama', k: 'full_name' }, { h: 'Email', k: 'email' }, { h: 'Unit', k: 'unit' }, { h: 'Jabatan', k: 'position' },
+        { h: 'Role', k: 'role' }, { h: 'Status', f: function (x) { return pill(x.status); } },
+        { h: '', f: function (x) {
+          return '<button class="btn ghost sm" data-act="empedit" data-id="' + esc(x.employee_id) + '">Edit</button> ' +
+            '<button class="btn ghost sm" data-act="empreset" data-id="' + esc(x.employee_id) + '" data-name="' + esc(x.full_name) + '">Reset Sandi</button> ' +
+            (x.status === 'AKTIF' ? '<button class="btn err sm" data-act="empstat" data-id="' + esc(x.employee_id) + '" data-s="NONAKTIF">Nonaktifkan</button>'
+              : '<button class="btn ok sm" data-act="empstat" data-id="' + esc(x.employee_id) + '" data-s="AKTIF">Aktifkan</button>');
+        } }
+      ], p.rows);
+    }, '<div class="card"><button class="btn" data-act="empadd">+ Tambah pegawai</button> <button class="btn ghost" data-act="empimp">Impor CSV</button></div>');
+  };
+  function empForm(e) {
+    e = e || {};
+    return '<div class="row">' + ff('NIP', 'employee_number', e.employee_number) + ff('Nama lengkap', 'full_name', e.full_name, 'text', 'required') + '</div>' +
+      ff('Email Akun', 'email', e.email, 'email', 'required') + '<div class="row">' + ff('Unit kerja', 'unit', e.unit) + ff('Jabatan', 'position', e.position) +
+      fs('Role', 'role', [['PEGAWAI', 'Pegawai'], ['ADMIN', 'Administrator']], e.role || 'PEGAWAI') + '</div>' +
+      ff(e.employee_id ? 'Kata sandi baru (kosongkan jika tidak diubah)' : 'Kata sandi awal (kosongkan untuk default NIP/123456)', 'password', '', 'password') +
+      (e.employee_id ? ftxt('Alasan perubahan', 'reason', '') : '');
+  }
+  H.empadd = function () {
+    modal('Tambah pegawai', empForm(), function (o) { return call('api_empSave', o).then(function () { toast('Pegawai ditambahkan.', 'ok'); S.reload && S.reload(); }); });
+  };
+  H.empedit = function (d) {
+    var e = (S.lastEmps || []).filter(function (x) { return x.employee_id === d.id; })[0];
+    if (!e) return toast('Data pegawai tidak ditemukan; muat ulang daftar.', 'err');
+    modal('Edit pegawai', empForm(e), function (o) {
+      o.employee_id = e.employee_id;
+      return call('api_empSave', o).then(function () { toast('Perubahan tersimpan.', 'ok'); S.reload && S.reload(); });
+    });
+  };
+  H.empstat = function (d) {
+    modal(d.s === 'NONAKTIF' ? 'Nonaktifkan pegawai' : 'Aktifkan pegawai', '<p class="muted">Data historis dan audit log tidak dihapus.</p>' + ftxt('Alasan (wajib)', 'reason', ''), function (o) {
+      return call('api_empStatus', d.id, d.s, o.reason).then(function () { toast('Status diperbarui.', 'ok'); S.reload && S.reload(); });
+    });
+  };
+  H.empreset = function (d) {
+    var body = '<p>Atur kata sandi baru untuk <b>' + esc(d.name) + '</b>.</p>' +
+      ff('Kata Sandi Baru (min. 6 karakter)', 'new_password', '123456', 'text', 'required');
+    modal('Reset Kata Sandi Pegawai', body, function (o) {
+      if (!o.new_password || o.new_password.length < 6) {
+        throw { message: 'Kata sandi baru minimal 6 karakter.' };
+      }
+      return call('api_resetPassword', d.id, o.new_password).then(function () {
+        toast('Kata sandi pegawai berhasil direset.', 'ok');
+      });
+    }, 'Reset Sandi');
+  };
+  function parseCSV(t) {
+    var first = t.split(/\r?\n/)[0] || '';
+    var delim = first.indexOf(',') >= 0 ? ',' : (first.indexOf(';') >= 0 ? ';' : (first.indexOf('\t') >= 0 ? '\t' : ','));
+    var rows = [], row = [], cur = '', q = false, i, c;
+    function endRow() { row.push(cur); cur = ''; if (row.some(function (x) { return x.trim() !== ''; })) rows.push(row); row = []; }
+    for (i = 0; i < t.length; i++) {
+      c = t[i];
+      if (q) { if (c === '"') { if (t[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+      else if (c === '"') q = true;
+      else if (c === delim) { row.push(cur); cur = ''; }
+      else if (c === '\n' || c === '\r') { if (c === '\r' && t[i + 1] === '\n') i++; endRow(); }
+      else cur += c;
+    }
+    endRow();
+    return rows;
+  }
+  H.empimp = function () {
+    var f = modal('Impor pegawai (CSV)',
+      '<p class="muted">Kolom: <b>nip, nama, email, unit, jabatan, role</b> (role opsional). Baris pertama = header. Seluruh baris divalidasi sebelum disimpan; jika ada kesalahan, tidak ada yang tersimpan.</p>' +
+      '<label>Berkas CSV<input type="file" id="cf" accept=".csv,.txt"></label>' + ftxt('Atau tempel isi CSV', 'csv', ''),
+      function (o) {
+        var rows = parseCSV(o.csv || '');
+        if (rows.length < 2) throw { message: 'CSV kosong atau tidak memiliki baris data.' };
+        var AL = { nip: 'employee_number', employee_number: 'employee_number', nama: 'full_name', full_name: 'full_name', email: 'email', unit: 'unit', unit_kerja: 'unit', jabatan: 'position', position: 'position', role: 'role' };
+        var map = rows[0].map(function (h) { return AL[String(h).trim().toLowerCase()] || null; });
+        if (map.indexOf('full_name') < 0 || map.indexOf('email') < 0) throw { message: 'Header wajib memuat kolom nama dan email.' };
+        var data = rows.slice(1).map(function (r) { var x = {}; map.forEach(function (k, i) { if (k) x[k] = (r[i] || '').trim(); }); return x; });
+        return call('api_empImport', data, false).then(function (pv) {
+          if (pv.errors.length) throw { message: 'Ada ' + pv.errors.length + ' baris bermasalah. ' + pv.errors.slice(0, 4).map(function (e) { return 'Baris ' + e.row + ': ' + e.message; }).join(' | ') };
+          if (!confirm('Impor ' + pv.valid + ' pegawai?')) throw { message: 'Impor dibatalkan.' };
+          return call('api_empImport', data, true).then(function (r) { toast(r.valid + ' pegawai diimpor.', 'ok'); S.reload && S.reload(); });
+        });
+      }, 'Validasi & impor');
+    $('#cf', f).addEventListener('change', function () {
+      var file = this.files[0]; if (!file) return;
+      var r = new FileReader(); r.onload = function () { $('[name=csv]', f).value = r.result; }; r.readAsText(file);
+    });
+  };
+
+  /* ---- Lokasi ---- */
+  P.locs = function (v) {
+    return call('api_locList').then(function (rows) {
+      S.locs = rows;
+      v.innerHTML = '<div class="card"><button class="btn" data-act="locadd">+ Tambah lokasi</button> <span class="muted">Absensi hanya diterima bila perangkat berada dalam radius dan akurasi GPS memenuhi batas.</span></div><div class="card">' + tbl([
+        { h: 'Nama', k: 'name' }, { h: 'Latitude', k: 'latitude' }, { h: 'Longitude', k: 'longitude' }, { h: 'Radius (m)', k: 'radius_m' }, { h: 'Maks akurasi (m)', k: 'max_accuracy_m' },
+        { h: 'Unit diizinkan', k: 'allowed_units' }, { h: 'Aktif', f: function (x) { return pill(x.active === 'Y' ? 'AKTIF' : 'NONAKTIF'); } },
+        { h: '', f: function (x) { return '<button class="btn ghost sm" data-act="locedit" data-id="' + esc(x.location_id) + '">Edit</button>'; } }
+      ], rows) + '</div>';
+    });
+  };
+  function locForm(l) {
+    l = l || { radius_m: 100, max_accuracy_m: 30, active: 'Y', allowed_units: '*' };
+    return ff('Nama lokasi', 'name', l.name, 'text', 'required') + '<div class="row">' + ff('Latitude', 'latitude', l.latitude, 'number', 'step="any" required') + ff('Longitude', 'longitude', l.longitude, 'number', 'step="any" required') +
+      '</div><button type="button" class="btn ghost sm" data-act="useloc">Gunakan lokasi saya saat ini</button><div class="row" style="margin-top:8px">' +
+      ff('Radius (m)', 'radius_m', l.radius_m, 'number', 'min="5" max="5000" required') + ff('Batas akurasi (m)', 'max_accuracy_m', l.max_accuracy_m, 'number', 'min="5" max="500" required') + '</div>' +
+      ff('Unit diizinkan (* = semua; pisahkan dengan koma)', 'allowed_units', l.allowed_units) + fchk('Aktif', 'active', l.active === 'Y') + ftxt('Alasan perubahan (wajib)', 'reason', '');
+  }
+  H.useloc = function (d, b) {
+    b.disabled = true;
+    getPos().then(function (p) { $('.modal [name=latitude]').value = p.lat.toFixed(6); $('.modal [name=longitude]').value = p.lng.toFixed(6); toast('Koordinat diisi (akurasi ±' + Math.round(p.accuracy) + ' m).', 'ok'); })
+      .catch(function (e) { toast(e.message, 'err'); }).then(function () { b.disabled = false; });
+  };
+  H.locadd = function () { modal('Tambah lokasi', locForm(), function (o) { return call('api_locSave', o).then(function () { toast('Lokasi tersimpan.', 'ok'); go('locs'); }); }); };
+  H.locedit = function (d) {
+    var l = (S.locs || []).filter(function (x) { return x.location_id === d.id; })[0];
+    modal('Edit lokasi', locForm(l), function (o) { o.location_id = d.id; return call('api_locSave', o).then(function () { toast('Lokasi tersimpan.', 'ok'); go('locs'); }); });
+  };
+
+  /* ---- Jadwal & Kalender ---- */
+  P.sched = function (v) {
+    var year = S.f.year || S.me.today.substr(0, 4);
+    return Promise.all([call('api_schList'), call('api_calList', year)]).then(function (r) {
+      S.sch = r[0]; S.cal = r[1];
+      v.innerHTML = '<div class="card"><h3>Jadwal kerja</h3><button class="btn" data-act="schadd">+ Tambah jadwal</button><p class="muted">Jadwal khusus (unit/tanggal efektif) menang atas jadwal umum (*). Hari tanpa jadwal dianggap libur.</p>' + tbl([
+        { h: 'Hari', f: function (x) { return esc(DAYS[x.day_of_week]); } }, { h: 'Masuk', k: 'start_time' }, { h: 'Pulang', k: 'end_time' }, { h: 'Unit', k: 'unit' },
+        { h: 'Efektif dari', k: 'effective_from' }, { h: 'Sampai', k: 'effective_to' }, { h: 'Aktif', f: function (x) { return pill(x.active === 'Y' ? 'AKTIF' : 'NONAKTIF'); } },
+        { h: '', f: function (x) { return '<button class="btn ghost sm" data-act="schedit" data-id="' + esc(x.schedule_id) + '">Edit</button>'; } }
+      ], r[0]) + '</div><div class="card"><h3>Kalender hari libur / hari kerja khusus</h3><div class="row"><label>Tahun<input type="number" id="cy" value="' + esc(year) + '" min="2000" max="2100"></label>' +
+        '<button class="btn ghost" data-act="calyear">Tampilkan</button><button class="btn" data-act="caladd">+ Tambah</button><button class="btn ghost" data-act="calimp">Impor massal</button></div>' + tbl([
+        { h: 'Tanggal', k: 'date' }, { h: 'Jenis', k: 'day_type' }, { h: 'Judul', k: 'title' }, { h: 'Override', k: 'workday_override' }, { h: 'Catatan', k: 'notes' },
+        { h: '', f: function (x) { return '<button class="btn ghost sm" data-act="caledit" data-id="' + esc(x.calendar_id) + '">Edit</button> <button class="btn err sm" data-act="caldel" data-id="' + esc(x.calendar_id) + '">Hapus</button>'; } }
+      ], r[1]) + '</div>';
+    });
+  };
+  function schForm(s) {
+    s = s || { day_of_week: 1, start_time: '08:15', end_time: '16:30', unit: '*', active: 'Y' };
+    return '<div class="row">' + fs('Hari', 'day_of_week', [1, 2, 3, 4, 5, 6, 7].map(function (i) { return [i, DAYS[i]]; }), s.day_of_week) + ff('Jam masuk', 'start_time', s.start_time, 'time') + ff('Jam pulang', 'end_time', s.end_time, 'time') + '</div>' +
+      '<div class="row">' + ff('Efektif dari', 'effective_from', s.effective_from, 'date') + ff('Efektif sampai', 'effective_to', s.effective_to, 'date') + ff('Unit (* = semua)', 'unit', s.unit) + '</div>' +
+      fchk('Aktif', 'active', s.active === 'Y') + ftxt('Alasan perubahan (wajib)', 'reason', '');
+  }
+  H.schadd = function () { modal('Tambah jadwal', schForm(), function (o) { return call('api_schSave', o).then(function () { toast('Jadwal tersimpan.', 'ok'); go('sched'); }); }); };
+  H.schedit = function (d) {
+    var s = S.sch.filter(function (x) { return x.schedule_id === d.id; })[0];
+    modal('Edit jadwal', schForm(s), function (o) { o.schedule_id = d.id; return call('api_schSave', o).then(function () { toast('Jadwal tersimpan.', 'ok'); go('sched'); }); });
+  };
+  H.calyear = function () { S.f.year = $('#cy').value; go('sched'); };
+  function calForm(c) {
+    c = c || { day_type: 'LIBUR_NASIONAL', workday_override: '' };
+    return '<div class="row">' + ff('Tanggal', 'date', c.date, 'date', 'required') + fs('Jenis', 'day_type', S.me.day_types.map(function (t) { return [t, t]; }), c.day_type) + '</div>' +
+      ff('Judul', 'title', c.title, 'text', 'required') + fs('Override hari kerja', 'workday_override', [['', '(ikuti jenis)'], ['Y', 'Y — hari kerja'], ['N', 'N — libur']], c.workday_override) +
+      ff('Catatan', 'notes', c.notes) + ftxt('Alasan perubahan (wajib)', 'reason', '');
+  }
+  H.caladd = function () { modal('Tambah entri kalender', calForm(), function (o) { return call('api_calSave', o).then(function () { toast('Tersimpan.', 'ok'); go('sched'); }); }); };
+  H.caledit = function (d) {
+    var c = S.cal.filter(function (x) { return x.calendar_id === d.id; })[0];
+    modal('Edit entri kalender', calForm(c), function (o) { o.calendar_id = d.id; return call('api_calSave', o).then(function () { toast('Tersimpan.', 'ok'); go('sched'); }); });
+  };
+  H.caldel = function (d) {
+    modal('Hapus entri kalender', '<p class="muted">Transaksi absensi historis tidak ikut terhapus.</p>' + ftxt('Alasan (wajib)', 'reason', ''), function (o) {
+      return call('api_calDelete', d.id, o.reason).then(function () { toast('Dihapus.', 'ok'); go('sched'); });
+    }, 'Hapus');
+  };
+  H.calimp = function () {
+    modal('Impor kalender massal', '<p class="muted">Satu baris per tanggal: <code>yyyy-mm-dd;JENIS;Judul</code><br>JENIS: ' + esc(S.me.day_types.join(', ')) + '. Semua baris divalidasi; bila ada yang salah, tidak ada yang tersimpan.</p>' +
+      ftxt('Data', 'lines', '', '2026-12-25;LIBUR_NASIONAL;Hari Raya Natal') + ftxt('Alasan', 'reason', 'Impor kalender resmi'), function (o) {
+      var rows = String(o.lines || '').split(/\r?\n/).filter(function (l) { return l.trim(); }).map(function (l) {
+        var p = l.split(/[;\t,]/); return { date: (p[0] || '').trim(), day_type: (p[1] || '').trim(), title: (p.slice(2).join(' ') || '').trim() };
+      });
+      return call('api_calImport', rows, o.reason).then(function (r) { toast(r.imported + ' entri diimpor.', 'ok'); go('sched'); });
+    }, 'Impor');
+  };
+
+  /* ---- Laporan ---- */
+  P.report = function (v) {
+    var f = S.f.rep = S.f.rep || { from: S.me.today.substr(0, 8) + '01', to: S.me.today, unit: '', q: '' };
+    v.innerHTML = '<div class="card"><h3>Laporan rekap &amp; potongan</h3><div class="row" id="flt">' + ff('Dari', 'from', f.from, 'date') + ff('Sampai', 'to', f.to, 'date') + ff('Unit', 'unit', f.unit) + ff('Nama/NIP', 'q', f.q) + '</div>' +
+      '<div class="row end"><button class="btn" data-act="rshow">Tampilkan</button>' +
+      '<button class="btn ghost" data-act="rexp" data-k="summary" data-f="csv">CSV ringkasan</button><button class="btn ghost" data-act="rexp" data-k="detail" data-f="csv">CSV harian</button>' +
+      '<button class="btn ghost" data-act="rexp" data-k="summary" data-f="pdf">PDF ringkasan</button><button class="btn ghost" data-act="rexp" data-k="detail" data-f="pdf">PDF harian</button>' +
+      '<button class="btn ok" data-act="rsave">Simpan rekap ke sheet</button></div></div><div id="rres"></div>';
+  };
+  function rf() { Object.assign(S.f.rep, vals($('#flt'))); return S.f.rep; }
+  H.rshow = function (d, b) {
+    b.disabled = true;
+    call('api_report', rf()).then(function (r) {
+      var m = r.meta;
+      $('#rres').innerHTML = '<div class="card"><b>Periode ' + esc(m.from) + ' s.d. ' + esc(m.to) + '</b> · ' + esc(m.unit) + ' · ' + esc(m.timezone) + '<div class="muted" style="font-size:13px">Dibuat ' + esc(m.generated_at) + ' oleh ' + esc(m.generated_by) +
+        ' · Versi aturan ' + esc(m.rule_version) + '</div><div class="muted" style="font-size:12px;margin-top:6px">' + esc(m.rules) + '</div></div>' +
+        '<div class="card"><h3>Rekap per pegawai</h3>' + tbl([
+          { h: 'NIP', k: 'employee_number' }, { h: 'Nama', k: 'full_name' }, { h: 'Unit', k: 'unit' }, { h: 'Hari kerja', k: 'work_days' }, { h: 'Hadir', k: 'hadir' },
+          { h: 'Terlambat', f: function (x) { return x.terlambat + '× · ' + rp(x.late_total); } }, { h: 'Pulang cepat', f: function (x) { return x.pulang_cepat + '× · ' + rp(x.early_total); } },
+          { h: 'Tdk masuk', f: function (x) { return x.no_in + '× · ' + rp(x.no_in_total); } }, { h: 'Tdk pulang', f: function (x) { return x.no_out + '× · ' + rp(x.no_out_total); } },
+          { h: 'Mangkir', k: 'mangkir' }, { h: 'Izin', k: 'izin' }, { h: 'Sakit', k: 'sakit' }, { h: 'Total potongan', f: function (x) { return '<b>' + rp(x.total) + '</b>'; } }
+        ], r.summary) + '</div><div class="card"><h3>Rincian harian</h3>' + (r.truncated ? '<p class="muted">Menampilkan 5.000 baris pertama; ekspor memuat data sesuai batas yang sama. Persempit filter bila perlu.</p>' : '') + tbl([
+          { h: 'Tanggal', k: 'date' }, { h: 'Nama', k: 'full_name' }, { h: 'Masuk', k: 'in_time' }, { h: 'Pulang', k: 'out_time' }, { h: 'Status', f: function (x) { return pill(x.status); } },
+          { h: 'Terlambat', f: function (x) { return rp(x.late_amount); } }, { h: 'Pulang cepat', f: function (x) { return rp(x.early_leave_amount); } },
+          { h: 'Tdk masuk', f: function (x) { return rp(x.missing_in_amount); } }, { h: 'Tdk pulang', f: function (x) { return rp(x.missing_out_amount); } },
+          { h: 'Total', f: function (x) { return '<b>' + rp(x.total_amount) + '</b>'; } }
+        ], r.detail) + '</div>';
+    }).catch(function (e) { toast(e.message, 'err'); }).then(function () { b.disabled = false; });
+  };
+  H.rexp = function (d, b) {
+    b.disabled = true;
+    call('api_reportExport', rf(), d.k, d.f).then(function (r) { dl(r.filename, r.mime, r.base64); toast('Ekspor dibuat.', 'ok'); })
+      .catch(function (e) { toast(e.message, 'err'); }).then(function () { b.disabled = false; });
+  };
+  H.rsave = function (d, b) {
+    if (!confirm('Simpan hasil perhitungan final periode ini ke sheet RekapPotongan (menimpa hasil sebelumnya untuk tanggal yang sama)?')) return;
+    b.disabled = true;
+    call('api_recapSave', rf()).then(function (r) { toast(r.saved + ' baris rekap disimpan (aturan ' + r.rule_version + ').', 'ok'); })
+      .catch(function (e) { toast(e.message, 'err'); }).then(function () { b.disabled = false; });
+  };
+
+  /* ---- Audit ---- */
+  P.audit = function (v) {
+    var tab = S.f.audtab || 'audit', t = S.me.today;
+    var top = '<div class="card"><button class="btn ' + (tab === 'audit' ? '' : 'ghost') + '" data-act="audtab" data-t="audit">Audit log</button> <button class="btn ' + (tab === 'try' ? '' : 'ghost') + '" data-act="audtab" data-t="try">Percobaan absensi ditolak</button></div>';
+    if (tab === 'try') {
+      return mkList(v, 'try', { from: addDays(t, -7), to: t, q: '', page: 1 }, function (f) { return ff('Dari', 'from', f.from, 'date') + ff('Sampai', 'to', f.to, 'date') + ff('Nama/kode', 'q', f.q); },
+        'api_attemptList', function (p) {
+          return tbl([{ h: 'Waktu', k: 'attempted_at' }, { h: 'Pegawai', k: 'full_name' }, { h: 'Jenis', k: 'type' }, { h: 'Kode alasan', k: 'reason_code' }, { h: 'Jarak (m)', k: 'distance_m' }, { h: 'Akurasi (m)', k: 'accuracy_m' }], p.rows);
+        }, top);
+    }
+    return mkList(v, 'aud', { from: addDays(t, -7), to: t, q: '', page: 1 }, function (f) { return ff('Dari', 'from', f.from, 'date') + ff('Sampai', 'to', f.to, 'date') + ff('Cari', 'q', f.q); },
+      'api_auditList', function (p) {
+        return tbl([{ h: 'Waktu', k: 'timestamp_server' }, { h: 'Aktor', k: 'actor_id' }, { h: 'Aksi', k: 'action' }, { h: 'Entitas', f: function (x) { return esc(x.entity_type + ' ' + x.entity_id); } },
+          { h: 'Sebelum', f: function (x) { return '<span title="' + esc(x.before_json) + '">' + esc(String(x.before_json).substr(0, 40)) + '</span>'; } },
+          { h: 'Sesudah', f: function (x) { return '<span title="' + esc(x.after_json) + '">' + esc(String(x.after_json).substr(0, 40)) + '</span>'; } }, { h: 'Alasan', k: 'reason' }], p.rows);
+      }, top);
+  };
+  H.audtab = function (d) { S.f.audtab = d.t; go('audit'); };
+
+  /* ---- Pengaturan ---- */
+  P.settings = function (v) {
+    return call('api_cfgList').then(function (rows) {
+      v.innerHTML = '<div class="card"><h3>Aturan &amp; konfigurasi</h3><p class="muted">Versi aturan saat ini: <b>' + esc(S.me.rule_version) +
+        '</b>. Butir bertanda “PERLU DISAHKAN” harus diputuskan pemilik proses sebelum produksi. Setiap perubahan diaudit dan menaikkan versi aturan.</p>' + tbl([
+        { h: 'Kunci', k: 'key' }, { h: 'Nilai', f: function (x) { return '<input id="cv-' + esc(x.key) + '" value="' + esc(x.value) + '" style="min-width:110px">'; } }, { h: 'Keterangan', k: 'description' },
+        { h: '', f: function (x) { return (x.key === 'timezone' || x.key === 'rule_version') ? '' : '<button class="btn sm" data-act="cfgsave" data-k="' + esc(x.key) + '">Simpan</button>'; } }
+      ], rows) + '</div>';
+    });
+  };
+  H.cfgsave = function (d) {
+    var val = $('[id="cv-' + d.k + '"]').value;
+    modal('Simpan ' + d.k, '<p>Nilai baru: <b>' + esc(val) + '</b></p>' + ftxt('Alasan perubahan (wajib)', 'reason', ''), function (o) {
+      return call('api_cfgSave', d.k, val, o.reason).then(function () { toast('Konfigurasi disimpan.', 'ok'); call('api_init').then(function (m) { S.me = m; go('settings'); }); });
+    });
+  };
+
+  /* ---------- HALAMAN LOGIN ---------- */
+  function showLogin(initialError) {
+    var savedId = localStorage.getItem('absensi_saved_identity') || '';
+    $('#app').innerHTML =
+      '<div class="login-wrap">' +
+        '<div class="login-card">' +
+          '<div class="login-header">' +
+            '<div class="login-badge">' +
+              '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>' +
+                '<circle cx="9" cy="7" r="4"></circle>' +
+                '<path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>' +
+                '<path d="M16 3.13a4 4 0 0 1 0 7.75"></path>' +
+              '</svg>' +
+            '</div>' +
+            '<h1 class="login-title">Sistem Absensi Pegawai</h1>' +
+            '<p class="login-desc">Silakan masuk menggunakan Email atau NIP untuk mencatat kehadiran</p>' +
+          '</div>' +
+          '<div class="login-body">' +
+            '<div id="login-err" class="login-err"' + (initialError ? ' style="display:flex;"' : '') + '>' +
+              '<span>⚠️</span><span id="login-err-msg">' + esc(initialError || '') + '</span>' +
+            '</div>' +
+            '<form id="login-form">' +
+              '<div class="field-box">' +
+                '<label for="login-id">Email atau NIP</label>' +
+                '<div class="input-wrap">' +
+                  '<input id="login-id" name="identity" type="text" placeholder="misal: nama@instansi.go.id atau NIP" value="' + esc(savedId) + '" required autocomplete="username" autofocus>' +
+                '</div>' +
+              '</div>' +
+              '<div class="field-box">' +
+                '<label for="login-pwd">Kata Sandi</label>' +
+                '<div class="input-wrap">' +
+                  '<input id="login-pwd" name="password" type="password" placeholder="Masukkan kata sandi" required autocomplete="current-password">' +
+                  '<button type="button" class="pwd-toggle" data-act="toggle_pwd" title="Tampilkan/Sembunyikan kata sandi">👁️</button>' +
+                '</div>' +
+              '</div>' +
+              '<div class="login-meta">' +
+                '<label class="chk"><input type="checkbox" id="login-rem"' + (savedId ? ' checked' : '') + '> Ingat identitas</label>' +
+              '</div>' +
+              '<button type="submit" class="login-btn" id="login-submit">Masuk ke Sistem</button>' +
+            '</form>' +
+            '<div class="login-info">' +
+              '<strong>Petunjuk Akses:</strong><br>' +
+              '• Administrator pertama dapat masuk dengan sandi <code>admin123</code>.<br>' +
+              '• Pegawai yang belum mengubah sandi dapat menggunakan NIP atau <code>123456</code>.<br>' +
+              '• Hubungi admin bila Anda lupa sandi atau membutuhkan bantuan akun.' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
+    var f = $('#login-form');
+    f.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var id = f.identity.value.trim();
+      var pwd = f.password.value;
+      var rem = $('#login-rem').checked;
+      if (!id || !pwd) {
+        showLoginErr('Email/NIP dan Kata Sandi wajib diisi.');
+        return;
+      }
+      if (rem) localStorage.setItem('absensi_saved_identity', id);
+      else localStorage.removeItem('absensi_saved_identity');
+
+      var btn = $('#login-submit');
+      btn.disabled = true;
+      btn.textContent = 'Memverifikasi…';
+      showLoginErr('');
+
+      call('api_login', id, pwd).then(function (res) {
+        S.token = res.token;
+        localStorage.setItem('absensi_token', res.token);
+        toast('Selamat datang, ' + res.user.name + '!', 'ok');
+        return call('api_init').then(function (me) {
+          S.me = me;
+          shell();
+          go('home');
+        });
+      }).catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = 'Masuk ke Sistem';
+        showLoginErr((err && err.message) || 'Email/NIP atau Kata Sandi salah.');
+      });
+    });
+  }
+
+  function showLoginErr(msg) {
+    var b = $('#login-err'), m = $('#login-err-msg');
+    if (!b || !m) return;
+    if (msg) {
+      m.textContent = msg;
+      b.style.display = 'flex';
+    } else {
+      b.style.display = 'none';
+      m.textContent = '';
+    }
+  }
+
+  /* ---------- start ---------- */
+  function startApp() {
+    S.token = localStorage.getItem('absensi_token') || '';
+    if (!S.token) {
+      call('api_init').then(function (me) {
+        S.me = me;
+        shell();
+        go('home');
+      }).catch(function () {
+        showLogin();
+      });
+    } else {
+      call('api_init').then(function (me) {
+        S.me = me;
+        shell();
+        go('home');
+      }).catch(function (err) {
+        localStorage.removeItem('absensi_token');
+        S.token = '';
+        showLogin(err && err.code === 'AUTH_REQUIRED' ? '' : (err && err.message));
+      });
+    }
+  }
+
+  startApp();
+})();

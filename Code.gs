@@ -3,10 +3,40 @@
  * Hanya fungsi tingkat atas yang dapat dipanggil dari browser; semua modul berupa objek.
  * Setiap API: identitas & role diperiksa di server; operasi tulis memakai LockService.
  */
-function doGet() {
-  return HtmlService.createTemplateFromFile('Index').evaluate()
-    .setTitle(APP.NAME)
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+function doGet(e) {
+  if (e && e.parameter && e.parameter.api) {
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, status: 'API ready', timestamp: U.nowStr() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+  try {
+    var s = include('Styles');
+    var j = include('Scripts');
+    if (s && j) {
+      return HtmlService.createHtmlOutput('<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>' + APP.NAME + '</title>' + s + '</head><body><div id="app"><div class="splash">Memuat aplikasi…</div></div><div id="toast" role="status" aria-live="polite"></div>' + j + '</body></html>')
+        .setTitle(APP.NAME)
+        .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+    }
+  } catch (x) { /* abaikan */ }
+  return HtmlService.createHtmlOutput('<h3>' + APP.NAME + '</h3><p>API backend aktif. Buka antarmuka aplikasi melalui URL Vercel.</p>');
+}
+
+function doPost(e) {
+  try {
+    var raw = (e && e.postData && e.postData.contents) || '{}';
+    var req = JSON.parse(raw);
+    var fnName = req.fn || req.action;
+    var token = req.token || '';
+    var args = req.args || [];
+    var res = api_call(token, fnName, args);
+    return ContentService.createTextOutput(JSON.stringify(res))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({
+      ok: false,
+      code: 'SERVER_ERROR',
+      message: (err && err.message) || 'Terjadi kendala pada server.'
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
 }
 
 function include(name) {

@@ -18,29 +18,58 @@
     var p = s.split('-'), d = new Date(+p[0], +p[1] - 1, +p[2] + n, 12);
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
+
+  var DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbxZUAB0KDTFONqNgpTEcwPRl9nxB846XlZ3d9o662HDhPzH5ecWoaoW5WXUynX2NjICrA/exec';
+  var API_URL = localStorage.getItem('absensi_api_url') || DEFAULT_API_URL;
+
+  function handleResponse(r, res, rej) {
+    if (r && r.ok) {
+      res(r.data);
+    } else {
+      if (r && (r.code === 'AUTH_REQUIRED' || r.code === 'USER_INACTIVE')) {
+        if (S.me) {
+          localStorage.removeItem('absensi_token');
+          S.token = '';
+          S.me = null;
+          showLogin(r.message || 'Sesi berakhir. Silakan masuk kembali.');
+        }
+      }
+      rej(r || { message: 'Respons tidak valid dari server.' });
+    }
+  }
+
   function call(fn) {
     var args = [].slice.call(arguments, 1);
-    return new Promise(function (res, rej) {
-      google.script.run
-        .withSuccessHandler(function (r) {
-          if (r && r.ok) {
-            res(r.data);
-          } else {
-            if (r && (r.code === 'AUTH_REQUIRED' || r.code === 'USER_INACTIVE')) {
-              if (S.me) {
-                localStorage.removeItem('absensi_token');
-                S.token = '';
-                S.me = null;
-                showLogin(r.message || 'Sesi berakhir. Silakan masuk kembali.');
-              }
-            }
-            rej(r || { message: 'Respons tidak valid dari server.' });
-          }
-        })
-        .withFailureHandler(function (e) {
-          rej({ message: (e && e.message) || 'Gagal menghubungi server.' });
-        })
-        .api_call(S.token || '', fn, args);
+
+    // Fallback bila dijalankan langsung di Apps Script iframe
+    if (typeof google !== 'undefined' && google.script && google.script.run && typeof google.script.run.api_call === 'function') {
+      return new Promise(function (res, rej) {
+        google.script.run
+          .withSuccessHandler(function (r) { handleResponse(r, res, rej); })
+          .withFailureHandler(function (e) { rej({ message: (e && e.message) || 'Gagal menghubungi server.' }); })
+          .api_call(S.token || '', fn, args);
+      });
+    }
+
+    // Default: fetch HTTP POST (untuk Vercel / domain web hosting)
+    return fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ fn: fn, token: S.token || '', args: args })
+    })
+    .then(function (response) {
+      if (!response.ok) throw new Error('Server mengembalikan kode status ' + response.status);
+      return response.json();
+    })
+    .then(function (r) {
+      return new Promise(function (res, rej) { handleResponse(r, res, rej); });
+    })
+    .catch(function (err) {
+      var msg = (err && err.message) || 'Gagal menghubungi server.';
+      if (msg.indexOf('Failed to fetch') >= 0 || msg.indexOf('NetworkError') >= 0 || msg.indexOf('Load failed') >= 0) {
+        msg = 'Koneksi ke server backend gagal. Pastikan deployment Web App disetel ke "Anyone" dan koneksi stabil.';
+      }
+      throw { message: msg };
     });
   }
   function toast(msg, type) {
