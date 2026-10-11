@@ -19,6 +19,7 @@
   }
 
   var DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbz3jp8-RIyuI9y8xXW0r2pFBGgqAl1v9zTncuPtrEaVnfbOOJhNkIbnEZGUnLyrgldKZA/exec';
+  try { localStorage.removeItem('absensi_api_url'); } catch (e) {}
   var API_URL = DEFAULT_API_URL;
 
   function handleResponse(r, res, rej) {
