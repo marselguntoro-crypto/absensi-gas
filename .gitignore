@@ -1,0 +1,17 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and environment
+*.log
+.env
+.env.*
+
+# Apps Script / Clasp credentials (if used)
+.clasp.json
+.clasprc.json
+
+# Editor directories
+.vscode/
+.idea/
