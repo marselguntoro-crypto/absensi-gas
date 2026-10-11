@@ -19,8 +19,8 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
 
-  var DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbxZUAB0KDTFONqNgpTEcwPRl9nxB846XlZ3d9o662HDhPzH5ecWoaoW5WXUynX2NjICrA/exec';
-  var API_URL = localStorage.getItem('absensi_api_url') || DEFAULT_API_URL;
+  var DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbz3jp8-RIyuI9y8xXW0r2pFBGgqAl1v9zTncuPtrEaVnfbOOJhNkIbnEZGUnLyrgldKZA/exec';
+  var API_URL = DEFAULT_API_URL;
 
   function handleResponse(r, res, rej) {
     if (r && r.ok) {
