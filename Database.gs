@@ -9,9 +9,15 @@ var DB = {
 
   ss: function () {
     if (DB._ss) return DB._ss;
-    var id = PropertiesService.getScriptProperties().getProperty('SS_ID');
-    var ss = id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
-    if (!ss) throw new AppError('SETUP_REQUIRED', 'Spreadsheet database belum ditentukan. Jalankan setupSistem() dari editor Apps Script.');
+    var id = (APP && APP.SS_ID) || PropertiesService.getScriptProperties().getProperty('SS_ID');
+    var ss = null;
+    if (id) {
+      try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; }
+    }
+    if (!ss) {
+      try { ss = SpreadsheetApp.getActiveSpreadsheet(); } catch (e) { ss = null; }
+    }
+    if (!ss) throw new AppError('SETUP_REQUIRED', 'Spreadsheet database (ID: ' + (id || '-') + ') belum dapat dibuka. Pastikan ID Spreadsheet benar dan telah diberi izin akses.');
     DB._ss = ss;
     return ss;
   },

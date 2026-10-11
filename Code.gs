@@ -67,11 +67,12 @@ function setupSistem() {
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    if (!SpreadsheetApp.getActiveSpreadsheet() && !PropertiesService.getScriptProperties().getProperty('SS_ID')) {
-      var ss = SpreadsheetApp.create('Database Absensi Pegawai');
-      PropertiesService.getScriptProperties().setProperty('SS_ID', ss.getId());
-      log.push('Spreadsheet baru dibuat: ' + ss.getUrl());
+    var targetId = (APP && APP.SS_ID) || PropertiesService.getScriptProperties().getProperty('SS_ID');
+    if (targetId) {
+      PropertiesService.getScriptProperties().setProperty('SS_ID', targetId);
     }
+    var ss = DB.ss();
+    log.push('Terhubung ke Spreadsheet: ' + ss.getUrl() + ' (ID: ' + ss.getId() + ')');
     DB.ensureSchema(log);
     var users = DB.all(APP.SHEETS.USERS);
     if (users.length) { Auth.requireAdmin(); } // setelah terpasang, hanya admin yang boleh menjalankan ulang

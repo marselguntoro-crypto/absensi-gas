@@ -5,6 +5,7 @@
 var APP = {
   NAME: 'Sistem Absensi Pegawai',
   TZ: 'Asia/Jakarta',
+  SS_ID: '1Xvl7fJnoInl7xIVmcQMyGRxdi21Wsxg-2mBLsqGH-qI',
   SHEETS: {
     USERS: 'Users', EMP: 'Pegawai', LOC: 'LokasiKantor', SCH: 'JadwalKerja',
     CAL: 'KalenderKerja', ATT: 'Absensi', LEAVE: 'PengajuanIzin',
